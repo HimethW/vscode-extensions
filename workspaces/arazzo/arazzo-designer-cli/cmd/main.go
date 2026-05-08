@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/wso2/arazzo-designer-cli/internal/docker"
 	"github.com/wso2/arazzo-designer-cli/internal/mcpserver"
 	"github.com/wso2/arazzo-designer-cli/internal/models"
 	"github.com/wso2/arazzo-designer-cli/internal/telemetry"
@@ -41,6 +42,9 @@ func serveCmd(args []string) {
 	traceEndpoint := fs.String("trace-endpoint", "", "URL of the local tracer server to receive span events (e.g. http://127.0.0.1:59600/span-events)")
 	otlpEndpoint := fs.String("otlp-endpoint", "", "Base URL of an OTLP/HTTP trace backend (e.g. http://localhost:4318 for Jaeger/Honeycomb)")
 	disableTLS := fs.Bool("disable-tls", false, "Disable TLS certificate verification for outbound HTTP requests (development only)")
+	dockerMode := fs.Bool("docker", false, "Package the Arazzo server into a Docker image instead of starting it locally")
+	outputDir := fs.String("o", "", "Output folder for Docker build artifacts; only valid with --docker")
+	fs.StringVar(outputDir, "output-dir", "", "Output folder for Docker build artifacts; only valid with --docker")
 
 	fs.Parse(args)
 
@@ -54,6 +58,26 @@ func serveCmd(args []string) {
 	if _, err := os.Stat(*filePath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: file not found: %s\n", *filePath)
 		os.Exit(1)
+	}
+
+	// -o / --output-dir is only meaningful with --docker.
+	if *outputDir != "" && !*dockerMode {
+		fmt.Fprintln(os.Stderr, "Error: -o / --output-dir can only be used with --docker")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	// --docker mode: package the server into a Docker image and exit.
+	// None of the server-specific flags are used in this path.
+	if *dockerMode {
+		if err := docker.BuildImage(docker.BuildConfig{
+			ArazzoFilePath: *filePath,
+			Port:           *port,
+			OutputDir:      *outputDir,
+		}); err != nil {
+			log.Fatalf("Docker packaging failed: %v", err)
+		}
+		return
 	}
 
 	// Build runtime params
@@ -122,6 +146,8 @@ Flags (serve):
   --bearer-token    Bearer token for API auth
   --api-key         API key for API auth
   --disable-tls     Disable TLS certificate verification for outbound requests (development only)
+  --docker          Package the server into a Docker image instead of starting it (requires Go + Docker)
+  -o, --output-dir  Output folder for Docker build artifacts; only valid with --docker
 
 Examples:
   # VS Code plugin (automatic)
@@ -131,5 +157,11 @@ Examples:
   arazzo-designer-cli serve -f workflow.arazzo.yaml -p 8080 --otlp-endpoint http://localhost:4318
 
   # Both simultaneously
-  arazzo-designer-cli serve -f workflow.arazzo.yaml --trace-endpoint http://127.0.0.1:59600/span-events --otlp-endpoint http://localhost:4318`)
+  arazzo-designer-cli serve -f workflow.arazzo.yaml --trace-endpoint http://127.0.0.1:59600/span-events --otlp-endpoint http://localhost:4318
+
+  # Package into a Docker image (does not start a server)
+  arazzo-designer-cli serve -f workflow.arazzo.yaml -p 8080 --docker
+
+  # Package into a Docker image and keep build artifacts in ./docker-output
+  arazzo-designer-cli serve -f workflow.arazzo.yaml -p 8080 --docker -o ./docker-output`)
 }
