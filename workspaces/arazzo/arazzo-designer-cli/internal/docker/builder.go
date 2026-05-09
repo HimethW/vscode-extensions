@@ -114,7 +114,7 @@ func BuildImage(cfg BuildConfig) error {
 	}
 
 	// ── 9. Persist the docker run command when an output dir was requested ───
-	runCmd := fmt.Sprintf("docker run --rm -p %d:%d %s", cfg.Port, cfg.Port, imageName)
+	runCmd := buildRunCommand(imageName, cfg.Port)
 	if cfg.OutputDir != "" {
 		if err := writeRunCommand(buildDir, runCmd); err != nil {
 			return fmt.Errorf("failed to write run-command.txt: %w", err)
@@ -122,7 +122,7 @@ func BuildImage(cfg BuildConfig) error {
 	}
 
 	// ── 10. Print the success summary ─────────────────────────────────────────
-	printSummary(imageName, cfg.Port, cfg.OutputDir, buildDir)
+	printSummary(imageName, cfg.Port, cfg.OutputDir, buildDir, runCmd)
 	return nil
 }
 
@@ -274,8 +274,11 @@ func generateDockerfile(arazzoFileName string, port int) string {
 	b.WriteString("RUN chmod +x /usr/local/bin/arazzo-designer-cli\n")
 	b.WriteString("COPY workspace/ /app/workspace/\n")
 	b.WriteString(fmt.Sprintf("EXPOSE %d\n", port))
+	// Use ENTRYPOINT to fix the required arguments.
+	// This ensures that even if the user passes extra flags to "docker run",
+	// the container always knows which Arazzo file to use.
 	b.WriteString(fmt.Sprintf(
-		"CMD [\"arazzo-designer-cli\", \"serve\", \"-f\", \"/app/workspace/%s\", \"-p\", \"%d\"]\n",
+		"ENTRYPOINT [\"arazzo-designer-cli\", \"serve\", \"-f\", \"/app/workspace/%s\", \"-p\", \"%d\"]\n",
 		arazzoFileName, port,
 	))
 	return b.String()
@@ -315,14 +318,48 @@ func copyFile(src, dst string) error {
 	return out.Sync()
 }
 
+// buildRunCommand constructs the minimal docker run command for the user.
+// It drops flags already baked into the image (-f, -p) and build-only flags
+// (--docker, -o/--output-dir). localhost/127.0.0.1 are mapped to
+// host.docker.internal so the command works out-of-the-box.
+func buildRunCommand(imageName string, port int) string {
+	var extra []string
+	args := os.Args[2:] // skip binary + "serve"
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		flagName, _, hasEq := strings.Cut(a, "=")
+		switch flagName {
+		case "--docker":
+			// build-only flag, no value
+		case "-o", "--output-dir":
+			if !hasEq {
+				i++ // skip separate value
+			}
+		case "-f", "--file", "-p":
+			if !hasEq {
+				i++ // skip separate value; already baked into image CMD
+			}
+		default:
+			a = strings.ReplaceAll(a, "localhost", "host.docker.internal")
+			a = strings.ReplaceAll(a, "127.0.0.1", "host.docker.internal")
+			extra = append(extra, a)
+		}
+	}
+	cmd := fmt.Sprintf("docker run --rm -p %d:%d %s", port, port, imageName)
+	if len(extra) > 0 {
+		cmd += " " + strings.Join(extra, " ")
+	}
+	return cmd
+}
+
 // printSummary writes the post-build instructions to stdout.
 // When outputDir is non-empty the path to the retained artifacts is shown.
-func printSummary(imageName string, port int, outputDir, buildDir string) {
+func printSummary(imageName string, port int, outputDir, buildDir, runCmd string) {
 	fmt.Println()
 	fmt.Println("Docker image built successfully!")
 	fmt.Println()
 	fmt.Printf("  Image:  %s\n", imageName)
-	fmt.Printf("  Run:    docker run --rm -p %d:%d %s\n", port, port, imageName)
+	fmt.Printf("  Run:    %s\n", runCmd)
 	fmt.Printf("  MCP:    http://localhost:%d/mcp\n", port)
 	fmt.Printf("  Run wf: POST http://localhost:%d/run/{workflowId}\n", port)
 	fmt.Printf("  Result: GET  http://localhost:%d/lastResult/{workflowId}\n", port)
