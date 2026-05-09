@@ -7,6 +7,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/wso2/arazzo-designer-cli/internal/docker"
 	"github.com/wso2/arazzo-designer-cli/internal/mcpserver"
@@ -49,16 +53,18 @@ func serveCmd(args []string) {
 	fs.Parse(args)
 
 	if *filePath == "" {
-		fmt.Fprintln(os.Stderr, "Error: -f flag (Arazzo file path) is required")
+		fmt.Fprintln(os.Stderr, "Error: -f flag (Arazzo file path or folder) is required")
 		fs.Usage()
 		os.Exit(1)
 	}
 
-	// Check file exists
-	if _, err := os.Stat(*filePath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: file not found: %s\n", *filePath)
+	// Resolve -f: accept both a direct file path and a folder.
+	resolvedPath, err := resolveArazzoFilePath(*filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	*filePath = resolvedPath
 
 	// -o / --output-dir is only meaningful with --docker.
 	if *outputDir != "" && !*dockerMode {
@@ -126,6 +132,71 @@ func serveCmd(args []string) {
 	if err := srv.Start(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
+}
+
+// resolveArazzoFilePath accepts either a path to an Arazzo file or a folder.
+// When given a folder it scans for exactly one .yaml/.yml file containing the
+// top-level "arazzo" key and returns its path. Returns an error if the path
+// does not exist, is a folder with zero or multiple Arazzo files, or if a
+// direct file path does not exist.
+func resolveArazzoFilePath(input string) (string, error) {
+	info, err := os.Stat(input)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("path does not exist: %s", input)
+		}
+		return "", fmt.Errorf("failed to access path: %w", err)
+	}
+
+	if !info.IsDir() {
+		// Direct file path — use as-is.
+		return input, nil
+	}
+
+	// Folder — scan for an Arazzo file.
+	entries, err := os.ReadDir(input)
+	if err != nil {
+		return "", fmt.Errorf("failed to read folder %q: %w", input, err)
+	}
+
+	var matches []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := strings.ToLower(e.Name())
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			continue
+		}
+		candidate := filepath.Join(input, e.Name())
+		if isArazzoFile(candidate) {
+			matches = append(matches, candidate)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no Arazzo file found in folder %q\n\nAn Arazzo file must be a .yaml or .yml file containing the top-level 'arazzo' key", input)
+	case 1:
+		fmt.Printf("Auto-detected Arazzo file: %s\n", matches[0])
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("multiple Arazzo files found in folder %q:\n  %s\n\nPlease specify the exact file using -f <file>", input, strings.Join(matches, "\n  "))
+	}
+}
+
+// isArazzoFile returns true if the YAML file contains the top-level "arazzo" key.
+func isArazzoFile(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	_, ok := raw["arazzo"]
+	return ok
 }
 
 func printUsage() {
