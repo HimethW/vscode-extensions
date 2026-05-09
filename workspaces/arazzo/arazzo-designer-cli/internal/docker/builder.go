@@ -83,6 +83,11 @@ func BuildImage(cfg BuildConfig) error {
 	// ── 6. Assemble the workspace directory inside the build context ─────────
 	// Contains the Arazzo file and every local (non-HTTP) source description.
 	workspaceDir := filepath.Join(buildDir, "workspace")
+	// Remove and recreate workspace/ so stale files from previous -o runs
+	// are never included in the Docker build context.
+	if err := os.RemoveAll(workspaceDir); err != nil {
+		return fmt.Errorf("failed to clean workspace directory: %w", err)
+	}
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 		return fmt.Errorf("failed to create workspace directory in build context: %w", err)
 	}
@@ -242,14 +247,27 @@ func crossCompileLinux(moduleRoot, outPath string) error {
 // copyLocalSourceDescriptions copies every source description file referenced
 // by a local (non-HTTP) URL into dstDir, preserving its relative sub-path.
 // Remote URLs are intentionally skipped — the server fetches them at runtime.
+// Returns an error if any local URL references a path outside dstDir, which
+// would either escape the Docker build context or be unreachable at runtime.
 func copyLocalSourceDescriptions(doc *models.ArazzoDoc, srcDir, dstDir string) error {
+	absDst, err := filepath.Abs(dstDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve workspace directory: %w", err)
+	}
 	for _, sd := range doc.SourceDescriptions {
 		url := sd.URL
 		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
 			continue
 		}
 		srcFile := filepath.Join(srcDir, filepath.FromSlash(url))
-		dstFile := filepath.Join(dstDir, filepath.FromSlash(url))
+		dstFile := filepath.Clean(filepath.Join(absDst, filepath.FromSlash(url)))
+		// Reject paths that escape the workspace directory.
+		if !strings.HasPrefix(dstFile, absDst+string(filepath.Separator)) {
+			return fmt.Errorf(
+				"source description %q resolves outside the Arazzo file directory and cannot be bundled into the Docker image.\nMove the file next to (or beneath) the Arazzo file and update its URL",
+				url,
+			)
+		}
 		if err := os.MkdirAll(filepath.Dir(dstFile), 0755); err != nil {
 			return fmt.Errorf("failed to create parent directory for %s: %w", url, err)
 		}
